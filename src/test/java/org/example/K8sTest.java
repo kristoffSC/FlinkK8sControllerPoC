@@ -1,22 +1,16 @@
 package org.example;
 
 import static java.util.Map.entry;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.fabric8.kubernetes.api.model.KubernetesResourceList;
-import io.fabric8.kubernetes.api.model.LimitRange;
-import io.fabric8.kubernetes.api.model.LimitRangeList;
 import io.fabric8.kubernetes.api.model.ObjectMeta;
 import io.fabric8.kubernetes.api.model.Service;
 import io.fabric8.kubernetes.api.model.ServiceList;
-import io.fabric8.kubernetes.api.model.apps.Deployment;
-import io.fabric8.kubernetes.api.model.apps.DeploymentList;
 import io.fabric8.kubernetes.client.KubernetesClient;
 import io.fabric8.kubernetes.client.KubernetesClientBuilder;
 import io.fabric8.kubernetes.client.dsl.MixedOperation;
 import java.util.List;
 import java.util.Map;
-import java.util.function.Predicate;
 import org.apache.flink.kubernetes.operator.api.FlinkSessionJob;
 import org.apache.flink.kubernetes.operator.api.spec.FlinkSessionJobSpec;
 import org.apache.flink.kubernetes.operator.api.spec.FlinkVersion;
@@ -32,7 +26,7 @@ import org.apache.flink.kubernetes.operator.api.status.FlinkSessionJobStatus;
 import org.apache.flink.kubernetes.operator.api.status.JobStatus;
 import org.junit.jupiter.api.Test;
 
-public class AppTest {
+public class K8sTest {
 
     @Test
     public void listServices() {
@@ -157,10 +151,10 @@ public class AppTest {
         flinkDeployment.setSpec(flinkDeploymentSpec);
         try (KubernetesClient kubernetesClient = new KubernetesClientBuilder().build()) {
 
-            // Create Cluster
+            // Uncomment to Create Cluster
             //kubernetesClient.resource(flinkDeployment).serverSideApply();
 
-            // Update cluster
+            // Uncomment to update cluster
             kubernetesClient.resource(flinkDeployment).patch();
         }
     }
