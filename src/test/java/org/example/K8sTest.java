@@ -2,13 +2,27 @@ package org.example;
 
 import static java.util.Map.entry;
 
+import io.fabric8.kubernetes.api.model.Container;
 import io.fabric8.kubernetes.api.model.KubernetesResourceList;
+import io.fabric8.kubernetes.api.model.ListOptions;
 import io.fabric8.kubernetes.api.model.ObjectMeta;
+import io.fabric8.kubernetes.api.model.PersistentVolumeClaim;
+import io.fabric8.kubernetes.api.model.PersistentVolumeClaimBuilder;
+import io.fabric8.kubernetes.api.model.PersistentVolumeClaimVolumeSource;
+import io.fabric8.kubernetes.api.model.Pod;
+import io.fabric8.kubernetes.api.model.PodSpec;
+import io.fabric8.kubernetes.api.model.PodStatus;
+import io.fabric8.kubernetes.api.model.PodTemplate;
+import io.fabric8.kubernetes.api.model.PodTemplateSpec;
 import io.fabric8.kubernetes.api.model.Service;
 import io.fabric8.kubernetes.api.model.ServiceList;
+import io.fabric8.kubernetes.api.model.Volume;
+import io.fabric8.kubernetes.api.model.VolumeMount;
 import io.fabric8.kubernetes.client.KubernetesClient;
 import io.fabric8.kubernetes.client.KubernetesClientBuilder;
 import io.fabric8.kubernetes.client.dsl.MixedOperation;
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import org.apache.flink.kubernetes.operator.api.FlinkSessionJob;
@@ -18,6 +32,7 @@ import org.apache.flink.kubernetes.operator.api.FlinkDeployment;
 import org.apache.flink.kubernetes.operator.api.spec.FlinkDeploymentSpec;
 import org.apache.flink.kubernetes.operator.api.spec.JobManagerSpec;
 import org.apache.flink.kubernetes.operator.api.spec.JobSpec;
+import org.apache.flink.kubernetes.operator.api.spec.JobState;
 import org.apache.flink.kubernetes.operator.api.spec.KubernetesDeploymentMode;
 import org.apache.flink.kubernetes.operator.api.spec.Resource;
 import org.apache.flink.kubernetes.operator.api.spec.TaskManagerSpec;
@@ -53,24 +68,7 @@ public class K8sTest {
     }
 
     @Test
-    public void listFlinkSessionJobs() {
-        try (KubernetesClient kubernetesClient = new KubernetesClientBuilder().build()) {
-            MixedOperation<FlinkSessionJob, KubernetesResourceList<FlinkSessionJob>,
-                io.fabric8.kubernetes.client.dsl.Resource<FlinkSessionJob>>
-                resources = kubernetesClient.resources(FlinkSessionJob.class);
-
-            List<FlinkSessionJob> items = resources.inNamespace("default").list().getItems();
-            for (FlinkSessionJob item : items) {
-                System.out.println("Flink Session Job: " + item);
-                System.out.println("FlinkSessionJob cluster: " + item.getSpec().getDeploymentName());
-                System.out.println("FlinkSessionJob name: " + item.getMetadata().getName());
-                System.out.println("----");
-            }
-        }
-    }
-
-    @Test
-    public void deleteFlinkSessionJob() {
+    public void stopFlinkSessionJobWithSavepoint() {
 
         FlinkSessionJob flinkSessionJob = new FlinkSessionJob();
         flinkSessionJob.setKind("FlinkSessionJob");
@@ -83,35 +81,6 @@ public class K8sTest {
 
         try (KubernetesClient kubernetesClient = new KubernetesClientBuilder().build()) {
             kubernetesClient.resource(flinkSessionJob).delete();
-        }
-    }
-
-    /*
-    Gives NPE, possibly a bug in operator. Also not sure what kind of Status should be used here.
-    Caused by: java.lang.NullPointerException
-	at org.apache.flink.kubernetes.operator.api.status.CommonStatus.getLifecycleState(CommonStatus.java:64)
-     */
-    @Test
-    public void updateStatusFlinkSessionJob() {
-
-        FlinkSessionJob flinkSessionJob = new FlinkSessionJob();
-        flinkSessionJob.setKind("FlinkSessionJob");
-        flinkSessionJob.setApiVersion("flink.apache.org/v1beta1");
-
-        ObjectMeta meta = new ObjectMeta();
-        meta.setNamespace("default");
-        meta.setName("basic-session-job-only-example-2");
-        flinkSessionJob.setMetadata(meta);
-        flinkSessionJob.setStatus(
-            FlinkSessionJobStatus.builder().jobStatus(
-                JobStatus.builder()
-                    .state("CANCELLED")
-                    .build()
-                ).build()
-        );
-
-        try (KubernetesClient kubernetesClient = new KubernetesClientBuilder().build()) {
-            kubernetesClient.resource(flinkSessionJob).updateStatus();
         }
     }
 
@@ -129,12 +98,15 @@ public class K8sTest {
 
         FlinkDeploymentSpec flinkDeploymentSpec = new FlinkDeploymentSpec();
         flinkDeploymentSpec.setFlinkVersion(FlinkVersion.v1_17);
-        flinkDeploymentSpec.setMode(KubernetesDeploymentMode.STANDALONE);
+        flinkDeploymentSpec.setMode(KubernetesDeploymentMode.NATIVE);
         flinkDeploymentSpec.setImage("flink:1.17");
         flinkDeploymentSpec.setServiceAccount("flink");
+        flinkDeploymentSpec.setPodTemplate(createPodWithVolume());
 
         Map<String, String> flinkConfiguration =
-            Map.ofEntries(entry("taskmanager.numberOfTaskSlots", "2"));
+            Map.of("taskmanager.numberOfTaskSlots", "2",
+                "state.savepoints.dir", "file:/opt/flink/",
+                "state.checkpoints.dir", "file:/opt/flink/");
         flinkDeploymentSpec.setFlinkConfiguration(flinkConfiguration);
 
         // JM
@@ -144,18 +116,17 @@ public class K8sTest {
 
         // TM
         TaskManagerSpec taskManagerSpec = new TaskManagerSpec();
-        taskManagerSpec.setResource(new Resource(0.05, "1024m", "2G"));
-        taskManagerSpec.setReplicas(3);
+        taskManagerSpec.setResource(new Resource(0.1, "1024m", "2G"));
         flinkDeploymentSpec.setTaskManager(taskManagerSpec);
 
         flinkDeployment.setSpec(flinkDeploymentSpec);
         try (KubernetesClient kubernetesClient = new KubernetesClientBuilder().build()) {
 
             // Uncomment to Create Cluster
-            //kubernetesClient.resource(flinkDeployment).serverSideApply();
+            kubernetesClient.resource(flinkDeployment).serverSideApply();
 
             // Uncomment to update cluster
-            kubernetesClient.resource(flinkDeployment).patch();
+            //kubernetesClient.resource(flinkDeployment).update();
         }
     }
 
@@ -174,6 +145,44 @@ public class K8sTest {
         }
     }
 
+    /* ------------------------------- */
+
+    // Failed Session Job has NULL job status???
+    @Test
+    public void listFlinkSessionJobs() {
+        try (KubernetesClient kubernetesClient = new KubernetesClientBuilder().build()) {
+            MixedOperation<FlinkSessionJob, KubernetesResourceList<FlinkSessionJob>,
+                io.fabric8.kubernetes.client.dsl.Resource<FlinkSessionJob>>
+                resources = kubernetesClient.resources(FlinkSessionJob.class);
+
+            List<FlinkSessionJob> items = resources.inNamespace("default").list().getItems();
+            for (FlinkSessionJob item : items) {
+                printFlinSessionJob(item);
+            }
+        }
+    }
+
+    @Test
+    public void listFlinkSessionJobsWithLabel() {
+
+        ListOptions listOptions = new ListOptions();
+        listOptions.setLabelSelector("CUSTOM_LABEL");
+        //listOptions.setLabelSelector("CUSTOM_LABEL=OLD");
+
+        // this label selector will print no Session Jobs.
+        //listOptions.setLabelSelector("CUSTOM_LABEL=BOGUS");
+
+        try (KubernetesClient kubernetesClient = new KubernetesClientBuilder().build()) {
+            List<FlinkSessionJob> resources =
+                kubernetesClient.resources(FlinkSessionJob.class).inNamespace("default")
+                    .list(listOptions).getItems();
+
+            for (FlinkSessionJob resource : resources) {
+                printFlinSessionJob(resource);
+            }
+        }
+    }
+
     @Test
     public void submitSessionJob() {
 
@@ -181,7 +190,132 @@ public class K8sTest {
             .jarURI(
                 "https://repo1.maven.org/maven2/org/apache/flink/flink-examples-streaming_2.12/1.16.1/flink-examples-streaming_2.12-1.16.1-TopSpeedWindowing.jar")
             .parallelism(1)
+            .upgradeMode(UpgradeMode.SAVEPOINT)
+            .args(new String[0])
+            .build();
+
+        FlinkSessionJobSpec sessionJobSpec = FlinkSessionJobSpec.builder()
+            .job(jobSpec)
+            .deploymentName("basic-session-deployment-only-example")
+            //.flinkConfiguration( Map.of("state.savepoints.dir", "file:/opt/flink/"))
+            .build();
+
+        FlinkSessionJob flinkSessionJob = new FlinkSessionJob();
+        flinkSessionJob.setKind("FlinkSessionJob");
+        flinkSessionJob.setApiVersion("flink.apache.org/v1beta1");
+
+        ObjectMeta meta = new ObjectMeta();
+        meta.setNamespace("default");
+        meta.setName("basic-session-job-only-example-3");
+
+        flinkSessionJob.setMetadata(meta);
+        flinkSessionJob.setSpec(sessionJobSpec);
+
+        try (KubernetesClient kubernetesClient = new KubernetesClientBuilder().build()) {
+            kubernetesClient.resource(flinkSessionJob).create();
+        }
+    }
+
+    // Adding a label does not restarts Flink job.
+    @Test
+    public void updateJobLabel() {
+
+        List<FlinkSessionJob> updatedJobs = new ArrayList<>();
+
+        // GEt Jobs and update labels
+        try (KubernetesClient kubernetesClient = new KubernetesClientBuilder().build()) {
+            MixedOperation<FlinkSessionJob, KubernetesResourceList<FlinkSessionJob>,
+                io.fabric8.kubernetes.client.dsl.Resource<FlinkSessionJob>>
+                resources = kubernetesClient.resources(FlinkSessionJob.class);
+
+            List<FlinkSessionJob> originalJobs = resources.inNamespace("default").list().getItems();
+            for (FlinkSessionJob sessionJob : originalJobs) {
+                Map<String, String> oldLabels = sessionJob.getMetadata().getLabels();
+                Map<String, String> newLabels;
+                if (oldLabels == null) {
+                    newLabels = new HashMap<>();
+                } else {
+                    newLabels = new HashMap<>(oldLabels);
+                }
+
+                newLabels.put("CUSTOM_LABEL", "OLD");
+
+                // Maybe we should have a copy of the Job?
+                sessionJob.getMetadata().setLabels(newLabels);
+                updatedJobs.add(sessionJob);
+            }
+        }
+
+        if (!updatedJobs.isEmpty()) {
+            try (KubernetesClient kubernetesClient = new KubernetesClientBuilder().build()) {
+                for (FlinkSessionJob updatedJob : updatedJobs) {
+                    kubernetesClient.resource(updatedJob).update();
+                }
+            }
+
+        }
+    }
+
+    @Test
+    public void updateJobArgsAndLabels() {
+
+        List<FlinkSessionJob> updatedJobs = new ArrayList<>();
+
+        // GEt Jobs and update labels
+        try (KubernetesClient kubernetesClient = new KubernetesClientBuilder().build()) {
+            MixedOperation<FlinkSessionJob, KubernetesResourceList<FlinkSessionJob>,
+                io.fabric8.kubernetes.client.dsl.Resource<FlinkSessionJob>>
+                resources = kubernetesClient.resources(FlinkSessionJob.class);
+
+            List<FlinkSessionJob> originalJobs = resources.inNamespace("default").list().getItems();
+            for (FlinkSessionJob sessionJob : originalJobs) {
+                Map<String, String> oldLabels = sessionJob.getMetadata().getLabels();
+                Map<String, String> newLabels;
+                if (oldLabels == null) {
+                    newLabels = new HashMap<>();
+                } else {
+                    newLabels = new HashMap<>(oldLabels);
+                }
+
+                newLabels.put("CUSTOM_LABEL", "OLD");
+
+                // Maybe we should have a copy of the Job?
+                // TODO Explore error handling here - if job args are not properly formatted,
+                //  this test will pass but job will not fail. How we should validate if job is
+                //  properly submitted and started?
+                sessionJob.getMetadata().setLabels(newLabels);
+                sessionJob.getSpec().getJob().setArgs(new String[] {"--hello=world"});
+                updatedJobs.add(sessionJob);
+            }
+        }
+
+        if (!updatedJobs.isEmpty()) {
+            try (KubernetesClient kubernetesClient = new KubernetesClientBuilder().build()) {
+                for (FlinkSessionJob updatedJob : updatedJobs) {
+
+                    // Update Jobs only in SAVEPOINT upgrade mode.
+                    if (updatedJob.getSpec().getJob().getUpgradeMode().equals(UpgradeMode.SAVEPOINT)) {
+                        kubernetesClient.resource(updatedJob).update();
+                    }
+                }
+            }
+
+        }
+    }
+
+    @Test
+    public void changeSessionJobStatus() {
+
+        JobSpec jobSpec = JobSpec.builder()
+            .jarURI(
+                "https://repo1.maven.org/maven2/org/apache/flink/flink-examples-streaming_2.12/1.16.1/flink-examples-streaming_2.12-1.16.1-TopSpeedWindowing.jar")
+            .parallelism(1)
             .upgradeMode(UpgradeMode.STATELESS)
+            .args(new String[0])
+            .savepointTriggerNonce(4L)
+            //.state(JobState.SUSPENDED)
+            //.state(JobState.RUNNING)
+            //.initialSavepointPath("file://opt/flink/savepoint-2d71e6-bf9c0639cbb3")
             .build();
 
         FlinkSessionJobSpec sessionJobSpec = FlinkSessionJobSpec.builder()
@@ -200,7 +334,109 @@ public class K8sTest {
         flinkSessionJob.setSpec(sessionJobSpec);
 
         try (KubernetesClient kubernetesClient = new KubernetesClientBuilder().build()) {
-            kubernetesClient.resource(flinkSessionJob).create();
+            FlinkSessionJob update = kubernetesClient.resource(flinkSessionJob).update();
+            System.out.println(update.getStatus().getError());
         }
     }
+
+    @Test
+    public void changeAllSessionJobStatus() {
+
+        try (KubernetesClient kubernetesClient = new KubernetesClientBuilder().build()) {
+            List<FlinkSessionJob> resources =
+                kubernetesClient.resources(FlinkSessionJob.class).list().getItems();
+
+            // Suspended FlinkSession job is marked as Canceled in FlinkUI but there is a k8s
+            // resource still present, in this case Job Status is FINISHED and LifeCycle State is SUSPENDED
+            for (FlinkSessionJob resource : resources) {
+                resource.getSpec().getJob().setState(JobState.RUNNING);
+                kubernetesClient.resource(resource).update();
+            }
+        }
+    }
+
+    // Deleted FLinkSessionJob is marked as Canceled in Flink UI but K8s resource is deleted in
+    // this case.
+    // Suspended FlinkSession job is also marked as Canceled in FlinkUI but there is a k8s
+    // resource still present, in this case Job Status is FINISHED and LifeCycle State is
+    // SUSPENDED
+    @Test
+    public void deleteFlinkSessionJob() {
+
+        FlinkSessionJob flinkSessionJob = new FlinkSessionJob();
+        flinkSessionJob.setKind("FlinkSessionJob");
+        flinkSessionJob.setApiVersion("flink.apache.org/v1beta1");
+
+        ObjectMeta meta = new ObjectMeta();
+        meta.setNamespace("default");
+        meta.setName("basic-session-job-only-example-3");
+        flinkSessionJob.setMetadata(meta);
+
+        try (KubernetesClient kubernetesClient = new KubernetesClientBuilder().build()) {
+            kubernetesClient.resource(flinkSessionJob).delete();
+        }
+    }
+
+    @Test
+    public void deleteAllSessionJob() {
+
+        try (KubernetesClient kubernetesClient = new KubernetesClientBuilder().build()) {
+            List<FlinkSessionJob> resources =
+                kubernetesClient.resources(FlinkSessionJob.class).list().getItems();
+
+            for (FlinkSessionJob resource : resources) {
+                kubernetesClient.resource(resource).delete();
+            }
+        }
+    }
+
+
+    // --------------------------- UTILS ----------------------
+    private void printFlinSessionJob(final FlinkSessionJob item) {
+        System.out.println("Flink Session Job: " + item);
+        System.out.println("Cluster: " + item.getSpec().getDeploymentName());
+        System.out.println("Job name: " + item.getMetadata().getName());
+        System.out.println("Job state: " + item.getStatus().getJobStatus().getState());
+        System.out.println("Job upgrade mode: " + item.getSpec().getJob().getUpgradeMode());
+        System.out.println("Job Labels: " + item.getMetadata().getLabels());
+        System.out.println("SavePoint Info: " + item.getStatus().getJobStatus().getSavepointInfo());
+        System.out.println("----");
+    }
+
+    private Pod createPodWithVolume() {
+
+        ObjectMeta podTemplateMetadata = new ObjectMeta();
+        podTemplateMetadata.setName("pod-template");
+
+        VolumeMount volumeMount = new VolumeMount();
+        volumeMount.setMountPath("/opt/flink/jobs/");
+        volumeMount.setName("flink-pv-storage");
+
+        Container container = new Container();
+        container.setName("flink-main-container");
+        container.setVolumeMounts(List.of(volumeMount));
+
+        PersistentVolumeClaimVolumeSource pvc = new PersistentVolumeClaimVolumeSource();
+        pvc.setClaimName("task-pv-claim");
+
+        Volume volume = new Volume();
+        volume.setName("flink-pv-storage");
+        volume.setPersistentVolumeClaim(pvc);
+
+        PodSpec podSpec = new PodSpec();
+        podSpec.setVolumes(List.of(volume));
+        podSpec.setContainers(List.of(container));
+
+        PodTemplateSpec podtemplateSpec = new PodTemplateSpec();
+        podtemplateSpec.setSpec(podSpec);
+
+        Pod pod = new Pod();
+        pod.setApiVersion("v1");
+        pod.setKind("Pod");
+        pod.setMetadata(podTemplateMetadata);
+        pod.setSpec(podSpec);
+
+        return pod;
+    }
+
 }
