@@ -187,8 +187,10 @@ public class K8sTest {
     public void submitSessionJob() {
 
         JobSpec jobSpec = JobSpec.builder()
-            .jarURI(
-                "https://repo1.maven.org/maven2/org/apache/flink/flink-examples-streaming_2.12/1.16.1/flink-examples-streaming_2.12-1.16.1-TopSpeedWindowing.jar")
+            //.jarURI(
+           // "https://repo1.maven.org/maven2/org/apache/flink/flink-examples-streaming_2.12/1.16.1/flink-examples-streaming_2.12-1.16.1-TopSpeedWindowing.jar")
+            .jarURI("https://github.com/kristoffSC/FlinkSimpleStreamingJob/raw/jarTests/FlinkSimpleStreamingJob-1.0-SNAPSHOT.jar")
+            //.jarURI("file:///opt/flink/jobs/FlinkSimpleStreamingJob-1.0-SNAPSHOT.jar")
             .parallelism(1)
             .upgradeMode(UpgradeMode.SAVEPOINT)
             .args(new String[0])
@@ -197,7 +199,6 @@ public class K8sTest {
         FlinkSessionJobSpec sessionJobSpec = FlinkSessionJobSpec.builder()
             .job(jobSpec)
             .deploymentName("basic-session-deployment-only-example")
-            //.flinkConfiguration( Map.of("state.savepoints.dir", "file:/opt/flink/"))
             .build();
 
         FlinkSessionJob flinkSessionJob = new FlinkSessionJob();
@@ -284,7 +285,7 @@ public class K8sTest {
                 //  this test will pass but job will not fail. How we should validate if job is
                 //  properly submitted and started?
                 sessionJob.getMetadata().setLabels(newLabels);
-                sessionJob.getSpec().getJob().setArgs(new String[] {"--hello=world"});
+                sessionJob.getSpec().getJob().setArgs(new String[] {"--hello2=world"});
                 updatedJobs.add(sessionJob);
             }
         }
@@ -378,7 +379,7 @@ public class K8sTest {
     }
 
     @Test
-    public void deleteAllSessionJob() {
+    public void deleteAllSessionJobs() {
 
         try (KubernetesClient kubernetesClient = new KubernetesClientBuilder().build()) {
             List<FlinkSessionJob> resources =
@@ -408,23 +409,34 @@ public class K8sTest {
         ObjectMeta podTemplateMetadata = new ObjectMeta();
         podTemplateMetadata.setName("pod-template");
 
-        VolumeMount volumeMount = new VolumeMount();
-        volumeMount.setMountPath("/opt/flink/jobs/");
-        volumeMount.setName("flink-pv-storage");
+        VolumeMount jobVolumeMount = new VolumeMount();
+        jobVolumeMount.setMountPath("/opt/flink/jobs/");
+        jobVolumeMount.setName("flink-jobs-pv-volume");
+
+        VolumeMount pluginsVolumeMount = new VolumeMount();
+        pluginsVolumeMount.setMountPath("/opt/flink/plugins/");
+        pluginsVolumeMount.setName("flink-plugin-pv-volume");
 
         Container container = new Container();
         container.setName("flink-main-container");
-        container.setVolumeMounts(List.of(volumeMount));
+        container.setVolumeMounts(List.of(jobVolumeMount, pluginsVolumeMount));
 
-        PersistentVolumeClaimVolumeSource pvc = new PersistentVolumeClaimVolumeSource();
-        pvc.setClaimName("task-pv-claim");
+        PersistentVolumeClaimVolumeSource jobPvc = new PersistentVolumeClaimVolumeSource();
+        jobPvc.setClaimName("flink-job-pv-claim");
 
-        Volume volume = new Volume();
-        volume.setName("flink-pv-storage");
-        volume.setPersistentVolumeClaim(pvc);
+        PersistentVolumeClaimVolumeSource pluginsPvc = new PersistentVolumeClaimVolumeSource();
+        pluginsPvc.setClaimName("flink-plugins-pv-claim");
+
+        Volume jobsVolume = new Volume();
+        jobsVolume.setName("flink-jobs-pv-volume");
+        jobsVolume.setPersistentVolumeClaim(jobPvc);
+
+        Volume pluginsVolume = new Volume();
+        pluginsVolume.setName("flink-plugin-pv-volume");
+        pluginsVolume.setPersistentVolumeClaim(pluginsPvc);
 
         PodSpec podSpec = new PodSpec();
-        podSpec.setVolumes(List.of(volume));
+        podSpec.setVolumes(List.of(jobsVolume, pluginsVolume));
         podSpec.setContainers(List.of(container));
 
         PodTemplateSpec podtemplateSpec = new PodTemplateSpec();
