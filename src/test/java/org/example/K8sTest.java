@@ -10,12 +10,15 @@ import io.fabric8.kubernetes.api.model.PersistentVolumeClaim;
 import io.fabric8.kubernetes.api.model.PersistentVolumeClaimBuilder;
 import io.fabric8.kubernetes.api.model.PersistentVolumeClaimVolumeSource;
 import io.fabric8.kubernetes.api.model.Pod;
+import io.fabric8.kubernetes.api.model.PodSecurityContext;
 import io.fabric8.kubernetes.api.model.PodSpec;
 import io.fabric8.kubernetes.api.model.PodStatus;
 import io.fabric8.kubernetes.api.model.PodTemplate;
 import io.fabric8.kubernetes.api.model.PodTemplateSpec;
+import io.fabric8.kubernetes.api.model.SecurityContext;
 import io.fabric8.kubernetes.api.model.Service;
 import io.fabric8.kubernetes.api.model.ServiceList;
+import io.fabric8.kubernetes.api.model.StatusDetails;
 import io.fabric8.kubernetes.api.model.Volume;
 import io.fabric8.kubernetes.api.model.VolumeMount;
 import io.fabric8.kubernetes.client.KubernetesClient;
@@ -99,14 +102,17 @@ public class K8sTest {
         FlinkDeploymentSpec flinkDeploymentSpec = new FlinkDeploymentSpec();
         flinkDeploymentSpec.setFlinkVersion(FlinkVersion.v1_17);
         flinkDeploymentSpec.setMode(KubernetesDeploymentMode.NATIVE);
+        //flinkDeploymentSpec.setMode(KubernetesDeploymentMode.STANDALONE);
         flinkDeploymentSpec.setImage("flink:1.17");
         flinkDeploymentSpec.setServiceAccount("flink");
         flinkDeploymentSpec.setPodTemplate(createPodWithVolume());
 
         Map<String, String> flinkConfiguration =
             Map.of("taskmanager.numberOfTaskSlots", "2",
-                "state.savepoints.dir", "file:/opt/flink/",
-                "state.checkpoints.dir", "file:/opt/flink/");
+                "state.savepoints.dir", "file:/opt/flink/jobs/",
+                "state.checkpoints.dir", "file:/opt/flink/jobs/",
+                "high-availability.type", "kubernetes",
+                "high-availability.storageDir", "file:/opt/flink/jobs/");
         flinkDeploymentSpec.setFlinkConfiguration(flinkConfiguration);
 
         // JM
@@ -117,6 +123,7 @@ public class K8sTest {
         // TM
         TaskManagerSpec taskManagerSpec = new TaskManagerSpec();
         taskManagerSpec.setResource(new Resource(0.1, "1024m", "2G"));
+        //taskManagerSpec.setReplicas(2);
         flinkDeploymentSpec.setTaskManager(taskManagerSpec);
 
         flinkDeployment.setSpec(flinkDeploymentSpec);
@@ -141,7 +148,11 @@ public class K8sTest {
         objectMeta.setNamespace("default");
 
         try (KubernetesClient kubernetesClient = new KubernetesClientBuilder().build()) {
-            kubernetesClient.resource(flinkDeployment).delete();
+            List<StatusDetails> delete = kubernetesClient.resource(flinkDeployment).delete();
+            for (StatusDetails statusDetails : delete) {
+                System.out.println(statusDetails);
+            }
+            System.out.println("----------------------");
         }
     }
 
@@ -187,13 +198,12 @@ public class K8sTest {
     public void submitSessionJob() {
 
         JobSpec jobSpec = JobSpec.builder()
-            //.jarURI(
-           // "https://repo1.maven.org/maven2/org/apache/flink/flink-examples-streaming_2.12/1.16.1/flink-examples-streaming_2.12-1.16.1-TopSpeedWindowing.jar")
+            //.jarURI("https://repo1.maven.org/maven2/org/apache/flink/flink-examples-streaming_2.12/1.16.1/flink-examples-streaming_2.12-1.16.1-TopSpeedWindowing.jar")
             .jarURI("https://github.com/kristoffSC/FlinkSimpleStreamingJob/raw/jarTests/FlinkSimpleStreamingJob-1.0-SNAPSHOT.jar")
             //.jarURI("file:///opt/flink/jobs/FlinkSimpleStreamingJob-1.0-SNAPSHOT.jar")
             .parallelism(1)
             .upgradeMode(UpgradeMode.SAVEPOINT)
-            .args(new String[0])
+            .args(new String[]{"--restart", "yes"})
             .build();
 
         FlinkSessionJobSpec sessionJobSpec = FlinkSessionJobSpec.builder()
@@ -213,7 +223,10 @@ public class K8sTest {
         flinkSessionJob.setSpec(sessionJobSpec);
 
         try (KubernetesClient kubernetesClient = new KubernetesClientBuilder().build()) {
-            kubernetesClient.resource(flinkSessionJob).create();
+            FlinkSessionJob result = kubernetesClient.resource(flinkSessionJob).create();
+            System.out.println(result);
+            System.out.println("Status Error: " + result.getStatus().getError());
+            System.out.println(result.getStatus().getJobStatus());
         }
     }
 
@@ -280,12 +293,15 @@ public class K8sTest {
 
                 newLabels.put("CUSTOM_LABEL", "OLD");
 
+                // this will throw from KubernetesClient.
+                //newLabels.put("$@%@#$%@#$", "Invalid_label");
+
                 // Maybe we should have a copy of the Job?
                 // TODO Explore error handling here - if job args are not properly formatted,
                 //  this test will pass but job will not fail. How we should validate if job is
                 //  properly submitted and started?
                 sessionJob.getMetadata().setLabels(newLabels);
-                sessionJob.getSpec().getJob().setArgs(new String[] {"--hello2=world"});
+                sessionJob.getSpec().getJob().setArgs(new String[] {"--hello3=world"});
                 updatedJobs.add(sessionJob);
             }
         }
@@ -296,7 +312,10 @@ public class K8sTest {
 
                     // Update Jobs only in SAVEPOINT upgrade mode.
                     if (updatedJob.getSpec().getJob().getUpgradeMode().equals(UpgradeMode.SAVEPOINT)) {
-                        kubernetesClient.resource(updatedJob).update();
+                        FlinkSessionJob update = kubernetesClient.resource(updatedJob).update();
+                        System.out.println(update);
+                        System.out.println("Status Error: " + update.getStatus().getError());
+                        System.out.println(update.getStatus().getJobStatus());
                     }
                 }
             }
@@ -386,7 +405,33 @@ public class K8sTest {
                 kubernetesClient.resources(FlinkSessionJob.class).list().getItems();
 
             for (FlinkSessionJob resource : resources) {
-                kubernetesClient.resource(resource).delete();
+                List<StatusDetails> delete = kubernetesClient.resource(resource).delete();
+                for (StatusDetails statusDetails : delete) {
+                    System.out.println(statusDetails);
+                }
+                System.out.println("------------------");
+            }
+        }
+    }
+
+    // Some jobs cannot be deleted by kubectl deleted because they are "broken". Flink operator
+    // does not see them anymore. Maybe it's a bug. In this case we need to edit a
+    // FlinkSessionDeployment and delete the finalizers section.
+    @Test
+    public void deleteAllBrokenSessionJobs() {
+
+        try (KubernetesClient kubernetesClient = new KubernetesClientBuilder().build()) {
+            List<FlinkSessionJob> resources =
+                kubernetesClient.resources(FlinkSessionJob.class).list().getItems();
+
+            for (FlinkSessionJob resource : resources) {
+
+                if (resource.getStatus().getJobStatus().getState().equals("RECONCILING")) {
+                    resource.getMetadata().setFinalizers(null);
+                    FlinkSessionJob update = kubernetesClient.resource(resource).update();
+                        System.out.println(update);
+                    }
+                    System.out.println("------------------");
             }
         }
     }
@@ -417,9 +462,17 @@ public class K8sTest {
         pluginsVolumeMount.setMountPath("/opt/flink/plugins/");
         pluginsVolumeMount.setName("flink-plugin-pv-volume");
 
-        Container container = new Container();
-        container.setName("flink-main-container");
-        container.setVolumeMounts(List.of(jobVolumeMount, pluginsVolumeMount));
+        Container flinkMainContainer = new Container();
+        flinkMainContainer.setName("flink-main-container");
+        // This seems to do not work???
+        flinkMainContainer.setCommand(List.of(
+            "sh -c (mkdir -p /opt/flink/jobs)",
+            "sh -c (mkdir -p /opt/flink/plugins)",
+            "sh -c (mkdir -p /opt/flink/dupa)",
+            "sh -c (chown flink:flink /opt/flink/jobs/)",
+            "sh -c (chown flink:flink /opt/flink/plugins/)"
+        ));
+        flinkMainContainer.setVolumeMounts(List.of(jobVolumeMount, pluginsVolumeMount));
 
         PersistentVolumeClaimVolumeSource jobPvc = new PersistentVolumeClaimVolumeSource();
         jobPvc.setClaimName("flink-job-pv-claim");
@@ -435,9 +488,13 @@ public class K8sTest {
         pluginsVolume.setName("flink-plugin-pv-volume");
         pluginsVolume.setPersistentVolumeClaim(pluginsPvc);
 
+        PodSecurityContext secContext = new PodSecurityContext();
+        secContext.setFsGroup(9999L);
+
         PodSpec podSpec = new PodSpec();
+        podSpec.setSecurityContext(secContext);
         podSpec.setVolumes(List.of(jobsVolume, pluginsVolume));
-        podSpec.setContainers(List.of(container));
+        podSpec.setContainers(List.of(flinkMainContainer));
 
         PodTemplateSpec podtemplateSpec = new PodTemplateSpec();
         podtemplateSpec.setSpec(podSpec);
