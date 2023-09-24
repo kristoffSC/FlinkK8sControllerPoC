@@ -203,6 +203,7 @@ public class K8sTest {
             //.jarURI("file:///opt/flink/jobs/FlinkSimpleStreamingJob-1.0-SNAPSHOT.jar")
             .parallelism(1)
             .upgradeMode(UpgradeMode.SAVEPOINT)
+            //.initialSavepointPath("file:/opt/flink/jobs/savepoint-d28e38-ff710d3bdd0f")
             .args(new String[]{"--restart", "yes"})
             .build();
 
@@ -217,7 +218,7 @@ public class K8sTest {
 
         ObjectMeta meta = new ObjectMeta();
         meta.setNamespace("default");
-        meta.setName("basic-session-job-only-example-3");
+        meta.setName("basic-session-job-only-example-1");
 
         flinkSessionJob.setMetadata(meta);
         flinkSessionJob.setSpec(sessionJobSpec);
@@ -370,6 +371,7 @@ public class K8sTest {
             // resource still present, in this case Job Status is FINISHED and LifeCycle State is SUSPENDED
             for (FlinkSessionJob resource : resources) {
                 resource.getSpec().getJob().setState(JobState.RUNNING);
+                //resource.getSpec().getJob().setState(JobState.SUSPENDED);
                 kubernetesClient.resource(resource).update();
             }
         }
@@ -415,7 +417,7 @@ public class K8sTest {
     }
 
     // Some jobs cannot be deleted by kubectl deleted because they are "broken". Flink operator
-    // does not see them anymore. Maybe it's a bug. In this case we need to edit a
+    // does not see them anymore. Maybe it's a bug. In this case, we need to edit a
     // FlinkSessionDeployment and delete the finalizers section.
     @Test
     public void deleteAllBrokenSessionJobs() {
