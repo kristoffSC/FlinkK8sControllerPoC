@@ -1,26 +1,26 @@
 package org.example;
 
-import static java.util.Map.entry;
-
 import io.fabric8.kubernetes.api.model.Container;
+import io.fabric8.kubernetes.api.model.IntOrString;
 import io.fabric8.kubernetes.api.model.KubernetesResourceList;
 import io.fabric8.kubernetes.api.model.ListOptions;
 import io.fabric8.kubernetes.api.model.ObjectMeta;
-import io.fabric8.kubernetes.api.model.PersistentVolumeClaim;
-import io.fabric8.kubernetes.api.model.PersistentVolumeClaimBuilder;
 import io.fabric8.kubernetes.api.model.PersistentVolumeClaimVolumeSource;
 import io.fabric8.kubernetes.api.model.Pod;
 import io.fabric8.kubernetes.api.model.PodSecurityContext;
 import io.fabric8.kubernetes.api.model.PodSpec;
-import io.fabric8.kubernetes.api.model.PodStatus;
-import io.fabric8.kubernetes.api.model.PodTemplate;
 import io.fabric8.kubernetes.api.model.PodTemplateSpec;
-import io.fabric8.kubernetes.api.model.SecurityContext;
 import io.fabric8.kubernetes.api.model.Service;
 import io.fabric8.kubernetes.api.model.ServiceList;
 import io.fabric8.kubernetes.api.model.StatusDetails;
 import io.fabric8.kubernetes.api.model.Volume;
 import io.fabric8.kubernetes.api.model.VolumeMount;
+import io.fabric8.kubernetes.api.model.apps.Deployment;
+import io.fabric8.kubernetes.api.model.extensions.HTTPIngressPath;
+import io.fabric8.kubernetes.api.model.extensions.HTTPIngressRuleValue;
+import io.fabric8.kubernetes.api.model.extensions.Ingress;
+import io.fabric8.kubernetes.api.model.extensions.IngressBackend;
+import io.fabric8.kubernetes.api.model.extensions.IngressRule;
 import io.fabric8.kubernetes.client.KubernetesClient;
 import io.fabric8.kubernetes.client.KubernetesClientBuilder;
 import io.fabric8.kubernetes.client.dsl.MixedOperation;
@@ -28,11 +28,12 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import org.apache.flink.kubernetes.operator.api.FlinkDeployment;
 import org.apache.flink.kubernetes.operator.api.FlinkSessionJob;
+import org.apache.flink.kubernetes.operator.api.spec.FlinkDeploymentSpec;
 import org.apache.flink.kubernetes.operator.api.spec.FlinkSessionJobSpec;
 import org.apache.flink.kubernetes.operator.api.spec.FlinkVersion;
-import org.apache.flink.kubernetes.operator.api.FlinkDeployment;
-import org.apache.flink.kubernetes.operator.api.spec.FlinkDeploymentSpec;
+import org.apache.flink.kubernetes.operator.api.spec.IngressSpec;
 import org.apache.flink.kubernetes.operator.api.spec.JobManagerSpec;
 import org.apache.flink.kubernetes.operator.api.spec.JobSpec;
 import org.apache.flink.kubernetes.operator.api.spec.JobState;
@@ -40,8 +41,6 @@ import org.apache.flink.kubernetes.operator.api.spec.KubernetesDeploymentMode;
 import org.apache.flink.kubernetes.operator.api.spec.Resource;
 import org.apache.flink.kubernetes.operator.api.spec.TaskManagerSpec;
 import org.apache.flink.kubernetes.operator.api.spec.UpgradeMode;
-import org.apache.flink.kubernetes.operator.api.status.FlinkSessionJobStatus;
-import org.apache.flink.kubernetes.operator.api.status.JobStatus;
 import org.junit.jupiter.api.Test;
 
 public class K8sTest {
@@ -65,7 +64,14 @@ public class K8sTest {
             List<FlinkDeployment> items = resources.inNamespace("default").list().getItems();
             for (FlinkDeployment item : items) {
                 System.out.println("Flink Deployments: " + item);
+
+                // This has nothing to do with the real number of TM's. This only shows the
+                // definition that was used for the last deployment submission. In reality, TM
+                // could be scaled down/up using:
+                // "kubectl --scale deployment/xxx-taskmanager --replicas X" operation.
                 System.out.println("Number of TM replicas: " + item.getSpec().getTaskManager().getReplicas());
+                System.out.println("Deployment JobManager Deployment status: " + item.getStatus().getJobManagerDeploymentStatus().name());
+                System.out.println("Lifecycle status status: " + item.getStatus().getLifecycleState().name());
             }
         }
     }
@@ -101,18 +107,29 @@ public class K8sTest {
 
         FlinkDeploymentSpec flinkDeploymentSpec = new FlinkDeploymentSpec();
         flinkDeploymentSpec.setFlinkVersion(FlinkVersion.v1_17);
+
         flinkDeploymentSpec.setMode(KubernetesDeploymentMode.NATIVE);
         //flinkDeploymentSpec.setMode(KubernetesDeploymentMode.STANDALONE);
+
         flinkDeploymentSpec.setImage("flink:1.17");
         flinkDeploymentSpec.setServiceAccount("flink");
         flinkDeploymentSpec.setPodTemplate(createPodWithVolume());
+
+
+        IngressSpec ingress = IngressSpec.builder()
+            .template("flink.k8s.io/{{namespace}}/{{name}}(/|$)(.*)")
+            .className("nginx")
+            .annotations(Map.of("nginx.ingress.kubernetes.io/rewrite-target", "/$2"))
+            .build();
+        flinkDeploymentSpec.setIngress(ingress);
 
         Map<String, String> flinkConfiguration =
             Map.of("taskmanager.numberOfTaskSlots", "2",
                 "state.savepoints.dir", "file:/opt/flink/jobs/",
                 "state.checkpoints.dir", "file:/opt/flink/jobs/",
                 "high-availability.type", "kubernetes",
-                "high-availability.storageDir", "file:/opt/flink/jobs/");
+                "high-availability.storageDir", "file:/opt/flink/jobs/"
+                );
         flinkDeploymentSpec.setFlinkConfiguration(flinkConfiguration);
 
         // JM
@@ -123,10 +140,11 @@ public class K8sTest {
         // TM
         TaskManagerSpec taskManagerSpec = new TaskManagerSpec();
         taskManagerSpec.setResource(new Resource(0.1, "1024m", "2G"));
-        //taskManagerSpec.setReplicas(2);
+        taskManagerSpec.setReplicas(1);
         flinkDeploymentSpec.setTaskManager(taskManagerSpec);
 
         flinkDeployment.setSpec(flinkDeploymentSpec);
+
         try (KubernetesClient kubernetesClient = new KubernetesClientBuilder().build()) {
 
             // Uncomment to Create Cluster
@@ -134,6 +152,61 @@ public class K8sTest {
 
             // Uncomment to update cluster
             //kubernetesClient.resource(flinkDeployment).update();
+        }
+    }
+
+    @Test
+    public void submitFlinkIngressUi() {
+
+        try (KubernetesClient kc = new KubernetesClientBuilder().build()) {
+            MixedOperation<FlinkDeployment, KubernetesResourceList<FlinkDeployment>, io.fabric8.kubernetes.client.dsl.Resource<FlinkDeployment>>
+                resources = kc.resources(FlinkDeployment.class);
+
+            List<FlinkDeployment> items = resources.inNamespace("default").list().getItems();
+            for (FlinkDeployment item : items) {
+                System.out.println("Flink Deployments: " + item);
+                Ingress uiIngress = createUiIngress(item.getMetadata().getName());
+                kc.resource(uiIngress).serverSideApply();
+            }
+        }
+    }
+
+    @Test
+    public void updateSessionClusterSpec() {
+        try (KubernetesClient kc = new KubernetesClientBuilder().build()) {
+            MixedOperation<FlinkDeployment, KubernetesResourceList<FlinkDeployment>, io.fabric8.kubernetes.client.dsl.Resource<FlinkDeployment>>
+                resources = kc.resources(FlinkDeployment.class);
+
+            List<FlinkDeployment> items = resources.inNamespace("default").list().getItems();
+            for (FlinkDeployment item : items) {
+                if (item.getMetadata().getName().equalsIgnoreCase("basic-session-deployment-only-example")) {
+                    item.getSpec().getTaskManager().setReplicas(3);
+                    kc.resource(item).patch();
+                    break;
+                }
+            }
+        }
+    }
+
+    // Scaling TMs up and down. In this case, TM are treated as regular Flink Deployments.
+    @Test
+    public void updateDeployment() {
+        try (KubernetesClient kc = new KubernetesClientBuilder().build()) {
+            MixedOperation<Deployment, KubernetesResourceList<Deployment>,
+                io.fabric8.kubernetes.client.dsl.Resource<Deployment>>
+                resources = kc.resources(Deployment.class);
+
+            List<Deployment> items = resources.inNamespace("default").list().getItems();
+            for (Deployment item : items) {
+                if (item.getMetadata().getName().contains("taskmanager")) {
+
+                    // This is the equivalent of "kubectl --scale deployment/xxx-taskmanager --replicas
+                    // X" operation.
+                    item.getSpec().setReplicas(3);
+                    kc.resource(item).patch();
+                    break;
+                }
+            }
         }
     }
 
@@ -367,7 +440,7 @@ public class K8sTest {
             List<FlinkSessionJob> resources =
                 kubernetesClient.resources(FlinkSessionJob.class).list().getItems();
 
-            // Suspended FlinkSession job is marked as Canceled in FlinkUI but there is a k8s
+            // Suspended FlinkSession job is marked as Canceled in FlinkUI, but there is a k8s
             // resource still present, in this case Job Status is FINISHED and LifeCycle State is SUSPENDED
             for (FlinkSessionJob resource : resources) {
                 resource.getSpec().getJob().setState(JobState.RUNNING);
@@ -377,9 +450,9 @@ public class K8sTest {
         }
     }
 
-    // Deleted FLinkSessionJob is marked as Canceled in Flink UI but K8s resource is deleted in
+    // Deleted FLinkSessionJob is marked as Canceled in Flink UI, but K8s resource is deleted in
     // this case.
-    // Suspended FlinkSession job is also marked as Canceled in FlinkUI but there is a k8s
+    // Suspended FlinkSession job is also marked as Canceled in FlinkUI, but there is a k8s
     // resource still present, in this case Job Status is FINISHED and LifeCycle State is
     // SUSPENDED
     @Test
@@ -450,6 +523,44 @@ public class K8sTest {
         System.out.println("SavePoint Info: " + item.getStatus().getJobStatus().getSavepointInfo());
         System.out.println("----");
     }
+
+    private Ingress createUiIngress(String deploymentName) {
+
+        ObjectMeta meta = new ObjectMeta();
+        meta.setName("advanced-ingress");
+        meta.setNamespace("default");
+        meta.setAnnotations(Map.of("nginx.ingress.kubernetes.io/rewrite-target", " /$2"));
+
+        Ingress ingress = new Ingress();
+        ingress.setKind("Ingress");
+        ingress.setApiVersion("networking.k8s.io/v1");
+        ingress.setMetadata(meta);
+
+        final io.fabric8.kubernetes.api.model.extensions.IngressSpec ingresSpec =
+            new io.fabric8.kubernetes.api.model.extensions.IngressSpec();
+
+        ingresSpec.setIngressClassName("nginx");
+
+        HTTPIngressRuleValue httpIngressRule = new HTTPIngressRuleValue();
+        HTTPIngressPath ingressRulePath = new HTTPIngressPath();
+        ingressRulePath.setPath("/default/"+ deploymentName + "(/|$)(.*)");
+        ingressRulePath.setPathType("ImplementationSpecific");
+
+        IngressBackend ingressBackend = new IngressBackend();
+        ingressBackend.setServiceName("advanced-ingress-rest");
+        ingressBackend.setServicePort(new IntOrString("8081"));
+
+        ingressRulePath.setBackend(ingressBackend);
+        httpIngressRule.setPaths(List.of(ingressRulePath));
+
+        IngressRule ingressRule = new IngressRule("flink.k8s.io", httpIngressRule);
+        ingresSpec.setRules(List.of(ingressRule));
+        ingress.setSpec(ingresSpec);
+
+        return ingress;
+
+    }
+
 
     private Pod createPodWithVolume() {
 
